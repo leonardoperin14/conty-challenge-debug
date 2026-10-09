@@ -241,6 +241,41 @@ describe("regressões do incidente de repasses", () => {
     expect(targetResult.payout?.status).toBe("pending");
   });
 
+  it("rejeita chave global de outra missão sem alterar o alvo ainda aberto", async () => {
+    const sourceApproval = await postJson(context, "/approvals", {
+      mission_id: "msn_1900",
+      approved_at: "2026-03-12T18:11:00.000Z",
+      idempotency_key: "pay_open_collision",
+    });
+    expect(sourceApproval.status).toBe(201);
+    const sourceBody = (await sourceApproval.json()) as ApprovalResponse;
+
+    const collision = await postJson(context, "/approvals", {
+      mission_id: "msn_2044",
+      approved_at: "2026-03-12T21:05:00.000Z",
+      idempotency_key: "pay_open_collision",
+    });
+    expect(collision.status).toBe(409);
+    const collisionBody = (await collision.json()) as Record<string, unknown>;
+    expect(Object.keys(collisionBody)).toEqual(["error"]);
+    expect(collisionBody).not.toHaveProperty("ledger");
+    expect(collisionBody).not.toHaveProperty("payout");
+    expect(JSON.stringify(collisionBody)).not.toContain(sourceBody.ledger.id);
+
+    const sourceResult = await mission(context, "msn_1900");
+    expect(sourceResult.mission.status).toBe("approved");
+    expect(sourceResult.ledger).toHaveLength(1);
+    expect(sourceResult.ledger[0].id).toBe(sourceBody.ledger.id);
+    expect(sourceResult.ledger[0].amount_brl).toBe(150);
+    expect(sourceResult.payout?.id).toBe(sourceBody.payout.id);
+    expect(sourceResult.payout?.status).toBe("pending");
+
+    const targetResult = await mission(context, "msn_2044");
+    expect(targetResult.mission.status).toBe("open");
+    expect(targetResult.ledger).toHaveLength(0);
+    expect(targetResult.payout).toBeNull();
+  });
+
   it.each([
     { providerStatus: "PENDING", expectedStatus: "pending" },
     { providerStatus: "RECEIVED", expectedStatus: "paid" },
