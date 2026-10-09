@@ -99,7 +99,14 @@ export function createApp(db: DatabaseSync) {
       return c.json({ error: "prazo encerrado" }, 409);
     }
 
-    const existing = one<Ledger>(db, "SELECT * FROM ledger WHERE idempotency_key = ?", key);
+    const existingByKey = one<Ledger>(db, "SELECT * FROM ledger WHERE idempotency_key = ?", key);
+    if (existingByKey && existingByKey.mission_id !== mission.id) {
+      return c.json({ error: "chave de idempotência já utilizada" }, 409);
+    }
+
+    const existing =
+      existingByKey ??
+      one<Ledger>(db, "SELECT * FROM ledger WHERE mission_id = ? ORDER BY created_at LIMIT 1", mission.id);
     if (existing) {
       const payout = one<Payout>(db, "SELECT * FROM payouts WHERE mission_id = ?", mission.id) ?? null;
       return c.json({ mission_id: mission.id, status: mission.status, ledger: existing, payout });

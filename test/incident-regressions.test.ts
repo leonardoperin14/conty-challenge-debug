@@ -17,6 +17,7 @@ type MissionResponse = {
 };
 type ApprovalResponse = {
   mission_id: string;
+  status: string;
   ledger: { id: string; idempotency_key: string; amount_brl: number };
   payout: { id: string };
 };
@@ -158,6 +159,86 @@ describe("regressões do incidente de repasses", () => {
       .prepare("SELECT COUNT(*) AS count FROM payouts WHERE mission_id = ?")
       .get("msn_2044") as { count: number };
     expect(payouts.count).toBe(1);
+  });
+
+  it("reutiliza o crédito quando a missão aprovada recebe uma chave diferente", async () => {
+    const first = await postJson(context, "/approvals", {
+      mission_id: "msn_1900",
+      approved_at: "2026-03-12T18:11:00.000Z",
+      idempotency_key: "pay_first_key",
+    });
+    expect(first.status).toBe(201);
+    const firstBody = (await first.json()) as ApprovalResponse;
+
+    const retry = await postJson(context, "/approvals", {
+      mission_id: "msn_1900",
+      approved_at: "2026-03-12T18:11:00.000Z",
+      idempotency_key: "pay_different_key",
+    });
+    expect(retry.status).toBe(200);
+    const retryBody = (await retry.json()) as ApprovalResponse;
+
+    expect(retryBody.status).toBe("approved");
+    expect(retryBody.ledger.id).toBe(firstBody.ledger.id);
+    expect(retryBody.ledger.idempotency_key).toBe("pay_first_key");
+    expect(retryBody.ledger.amount_brl).toBe(150);
+    expect(retryBody.payout.id).toBe(firstBody.payout.id);
+
+    const result = await mission(context, "msn_1900");
+    expect(result.mission.status).toBe("approved");
+    expect(result.ledger).toHaveLength(1);
+    expect(result.ledger[0].id).toBe(firstBody.ledger.id);
+    expect(result.ledger[0].amount_brl).toBe(150);
+    expect(result.ledger.reduce((total, ledger) => total + ledger.amount_brl, 0)).toBe(150);
+    expect(result.payout?.id).toBe(firstBody.payout.id);
+  });
+
+  it("rejeita colisão global antes do fallback para o crédito de uma missão aprovada", async () => {
+    const sourceApproval = await postJson(context, "/approvals", {
+      mission_id: "msn_1900",
+      approved_at: "2026-03-12T18:11:00.000Z",
+      idempotency_key: "pay_shared_key",
+    });
+    expect(sourceApproval.status).toBe(201);
+    const sourceBody = (await sourceApproval.json()) as ApprovalResponse;
+
+    const targetApproval = await postJson(context, "/approvals", {
+      mission_id: "msn_2044",
+      approved_at: "2026-03-12T21:05:00.000Z",
+      idempotency_key: "pay_target_key",
+    });
+    expect(targetApproval.status).toBe(201);
+    const targetBody = (await targetApproval.json()) as ApprovalResponse;
+
+    const collision = await postJson(context, "/approvals", {
+      mission_id: "msn_2044",
+      approved_at: "2026-03-12T21:05:00.000Z",
+      idempotency_key: "pay_shared_key",
+    });
+    expect(collision.status).toBe(409);
+    const collisionBody = (await collision.json()) as Record<string, unknown>;
+    expect(Object.keys(collisionBody)).toEqual(["error"]);
+    expect(collisionBody).not.toHaveProperty("ledger");
+    expect(collisionBody).not.toHaveProperty("payout");
+    expect(JSON.stringify(collisionBody)).not.toContain(sourceBody.ledger.id);
+
+    const sourceResult = await mission(context, "msn_1900");
+    expect(sourceResult.mission.status).toBe("approved");
+    expect(sourceResult.ledger).toHaveLength(1);
+    expect(sourceResult.ledger[0].id).toBe(sourceBody.ledger.id);
+    expect(sourceResult.ledger[0].amount_brl).toBe(150);
+    expect(sourceResult.payout?.id).toBe(sourceBody.payout.id);
+    expect(sourceResult.payout?.provider_status).toBeNull();
+    expect(sourceResult.payout?.status).toBe("pending");
+
+    const targetResult = await mission(context, "msn_2044");
+    expect(targetResult.mission.status).toBe("approved");
+    expect(targetResult.ledger).toHaveLength(1);
+    expect(targetResult.ledger[0].id).toBe(targetBody.ledger.id);
+    expect(targetResult.ledger[0].amount_brl).toBe(80);
+    expect(targetResult.payout?.id).toBe(targetBody.payout.id);
+    expect(targetResult.payout?.provider_status).toBeNull();
+    expect(targetResult.payout?.status).toBe("pending");
   });
 
   it.each([
