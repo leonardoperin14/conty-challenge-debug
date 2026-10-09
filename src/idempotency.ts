@@ -1,3 +1,3 @@
 export function normalizeKey(key: string): string {
-  return key.toLowerCase();
+  return key.replace(/\u200B/g, "").trim().toLowerCase();
 }
